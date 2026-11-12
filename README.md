@@ -41,6 +41,8 @@ Commit the LaTeX source, the bibliography, and the figures, never the compiled P
 
 ## Files provided
 
+The steps are those of [From video to figures](#from-video-to-figures).
+
 | File | Use |
 |---|---|
 | `README.md` | These instructions. |
@@ -48,10 +50,10 @@ Commit the LaTeX source, the bibliography, and the figures, never the compiled P
 | `doc/template_Nordling2026_LatexExample/` | Example report: copy it to start your group report. |
 | `doc/lecture_Nordling2026_Exp2/` | Slides of the Experiment 2 lecture. |
 | `scripts/requirements.txt` | Python packages the scripts need. |
-| `scripts/track_video.py` | Step 1: tracks the marker, hub, and sync LED in one video and writes its frame table `frames/<run>.parquet`; prints the row for `runs.csv`. |
-| `scripts/process_raw.py` | Step 2: synchronises the Pi command log with the video through the LED and computes wheel angle, speed, acceleration, and input, with uncertainty, into `data/processed/`. |
+| `scripts/track_video.py` | Step 2: tracks the marker, hub, and sync LED in one video and writes its frame table `frames/<run>.parquet`; prints the row for `runs.csv`. |
+| `scripts/process_raw.py` | Step 3: synchronises the Pi command log with the video through the LED and computes wheel angle, speed, acceleration, and input, with uncertainty, into `data/processed/`. |
 | `scripts/quality_report.py` | Step 3: writes `quality.md` in the motor folders you name, with the checks, warnings, and recommendations. |
-| `scripts/select_wheel_frames.py` | Optional: picks the video frames shown in the wheel-overlay figure of the article's supplement. |
+| `scripts/select_wheel_frames.py` | Step 5, optional: picks the video frames shown in the wheel-overlay figure of the article's supplement. |
 | `scripts/plot_case_study_csme2026.py` | Step 4: fits the models and draws the case-study figures (small duty, step to 0.6, step to 1.0, hysteresis, rest noise, methods, wheel overlay) and writes their numbers as LaTeX macros in `results.tex`. |
 | `scripts/duckiebot_analysis/` | The library the scripts import: `tracking/` (video and blob tracking), `data/` (file formats and Pi logs), `analysis/` (angle, sync, processing, quality, case study), `models/`, and `visualization/` (figures). |
 | `scripts/tests/test_student_kit.py` | Tests of the trial names, folder names, LED colour, and motor selection. |
@@ -93,7 +95,9 @@ replace the names with yours.
 
    The defaults are the kit's blue marker tape and green sync LED.
    Check the first line it prints, `<n> frames, marker absent in <m>`;
-   if `m` is large, give a wider colour rule with `--marker-colour`.
+   if `m` is large, give a wider colour rule with `--marker-colour`, and use the same rule for every clip.
+   To track a video again, first delete its row from `runs.csv`, then rerun the command with `--force`, which replaces the frame table;
+   `runs.csv` must list each run once.
 3. Process the motor folder and check its quality:
 
    ```bash
