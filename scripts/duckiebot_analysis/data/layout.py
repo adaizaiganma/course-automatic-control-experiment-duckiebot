@@ -285,12 +285,22 @@ def read_runs(folder: str | Path) -> list[RunRecord]:
     """Read ``<folder>/runs.csv``.
 
     Raises:
-        ValueError: If a column is missing or a value is invalid.
+        ValueError: If a column is missing, a value is invalid, or a run is
+            listed twice.
     """
     path = Path(folder) / "runs.csv"
     out = []
+    first: dict[str, int] = {}
     for k, row in enumerate(_read_csv(path, RUNS_COLUMNS), 1):
         where = _where(path, k)
+        run = _required(row, "run", where)
+        if run in first:
+            # Re-tracking a video with --force prints a new row for the same run.
+            raise ValueError(
+                f"{where}: run {run} is also in data row {first[run]}; delete the "
+                "older row, which the re-tracked one replaces"
+            )
+        first[run] = k
         sha = _required(row, "video_sha256", where)
         if not _SHA256.match(sha):
             raise ValueError(f"{where}: video_sha256 must be 64 lower-case hex digits")
@@ -303,7 +313,7 @@ def read_runs(folder: str | Path) -> list[RunRecord]:
         trials = row["trials"]
         out.append(
             RunRecord(
-                run=_required(row, "run", where),
+                run=run,
                 video_file=_required(row, "video_file", where),
                 video_sha256=sha,
                 video_bytes=video_bytes,

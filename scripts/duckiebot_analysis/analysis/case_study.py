@@ -24,6 +24,7 @@ motor driver, placed on the video clock by the trial's clock (§10.3).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,22 +46,18 @@ from duckiebot_analysis.analysis.step_response import (
     start_stop_duties,
     step_info,
 )
-from duckiebot_analysis.data.pilogs import read_pi_log
+from duckiebot_analysis.data.layout import parse_motor_folder
+from duckiebot_analysis.data.pilogs import PiEvents, read_pi_log
 
 FloatArray = npt.NDArray[np.float64]
-# The motor folder and the start of its run names (label), as in the article.
-# configure() points these at another motor; runs and trials are found by
-# pattern or prefix, because each name ends in its recording time, and
-# _one_run/_one_trial stop unless exactly one matches.
+# The motor folder and the start of its run names (label), as in the article;
+# ARTICLE, below configure(), is the configuration they give.
 MOTOR = "db17-cherry-left-m5"
 LABEL = "R3-L"
-MOTOR_CHANNEL = "motor_left"  # the wheel of MOTOR in the Pi log
-E1_RUN = f"{LABEL}_A_sweep_dense_*.parquet"
-E1_TRIAL = f"{LABEL}_A_sweep_forward_010to036by020_rep01_"
-E1_TRIAL_NEG = f"{LABEL}_A_sweep_backward_010to036by020_rep01_"
-E2_RUN = f"{LABEL}_C_b060p040*.parquet"
-E2_PREFIX = f"{LABEL}_C_b060p040_rep"
 DT = 1 / 240  # frame interval of the slow-motion video
+# Two duties are equal when they differ by less than half the 1e-4 step to
+# which the Pi log writes them (§7), whatever rounding error computed them.
+DUTY_TOL = 5e-5
 # Share of the speeds of a wheel at rest, both signs together, that exceed the
 # rest threshold omega_min: the risk that noise alone makes a frame at rest
 # count as turning.
@@ -83,6 +80,44 @@ E2_STEPS = (
     ("down06", 1.0, 0.6),
     ("down0", 0.6, 0.0),
 )
+
+
+@dataclass(frozen=True)
+class CaseStudyConfig:
+    """The motor a case study analyses; build one with configure().
+
+    Runs and trials are found by pattern or prefix, because each name ends in
+    its recording time, and _one_run/_one_trial stop unless exactly one matches.
+    """
+
+    folder: str  # motor folder name, the same in data/raw and data/processed
+    label: str  # start of the run and trial names
+    channel: str  # the wheel's channel in the Pi log
+
+    @property
+    def e1_run(self) -> str:
+        """Pattern of the E1 run."""
+        return f"{self.label}_A_sweep_dense_*.parquet"
+
+    @property
+    def e1_trial(self) -> str:
+        """Prefix of the forward E1 sweep trial."""
+        return f"{self.label}_A_sweep_forward_010to036by020_rep01_"
+
+    @property
+    def e1_trial_neg(self) -> str:
+        """Prefix of the backward E1 sweep trial."""
+        return f"{self.label}_A_sweep_backward_010to036by020_rep01_"
+
+    @property
+    def e2_run(self) -> str:
+        """Pattern of the E2 run."""
+        return f"{self.label}_C_b060p040*.parquet"
+
+    @property
+    def e2_prefix(self) -> str:
+        """Prefix of every E2 trial."""
+        return f"{self.label}_C_b060p040_rep"
 
 
 @dataclass(frozen=True)
@@ -135,7 +170,7 @@ class CaseStudy:
     meta_e2: dict
     call_s: float
     speeds_06: dict[str, float]
-    # Name of the backward sweep trial, found by its prefix E1_TRIAL_NEG.
+    # Name of the backward sweep trial, found by its prefix e1_trial_neg.
     e1_neg_trial: str = ""
 
 
@@ -169,14 +204,15 @@ def trial_table(path: Path) -> dict[str, dict]:
     return {r["trial"]: r for r in pq.read_table(path).to_pylist()}
 
 
-def command_changes(log: Path, drift: float) -> list[tuple[float, float]]:
-    """Return (time from trial start, duty) of every change of the motor duty.
+def command_changes(
+    ev: PiEvents, drift: float, channel: str
+) -> list[tuple[float, float]]:
+    """Return (time from trial start, duty) of every change of the duty on channel.
 
     The command time is the middle of the Pi's call to the driver, scaled by
     the clock drift (§10.3), as the processing places it.
     """
-    ev = read_pi_log(log)
-    m = ev.channel == MOTOR_CHANNEL
+    m = ev.channel == channel
     tau = (ev.t_s[m] + ev.t_after_s[m]) / 2 * (1 + drift)
     out, prev = [], 0.0
     for t, v in zip(tau, ev.value[m], strict=True):
@@ -186,18 +222,18 @@ def command_changes(log: Path, drift: float) -> list[tuple[float, float]]:
     return out
 
 
-def call_duration(log: Path) -> float:
-    """Return the median time the Pi's calls to the motor driver took, in s."""
-    ev = read_pi_log(log)
-    m = ev.channel == MOTOR_CHANNEL
+def call_duration(ev: PiEvents, channel: str) -> float:
+    """Return the median time the Pi's calls to the driver on channel took, in s."""
+    m = ev.channel == channel
     return float(np.median(ev.t_after_s[m] - ev.t_s[m]))
 
 
 def speeds_at_06(processed: Path) -> dict[str, float]:
-    """Return per motor the mean |speed| at duty 0.6 of its C_b060p040 trials.
+    """Return per motor folder the mean |speed| at duty 0.6 of its C_b060p040 trials.
 
-    The speed is the mean over the last FINAL_S of the first hold at 0.6, and
-    the motor is named by the identifier ending its folder, such as m5.
+    The speed is the mean over the last FINAL_S of the first hold at 0.6. The
+    key is the folder name, such as db17-cherry-left-m5, so that one motor
+    tested on two robots or sides counts once per mounting.
     """
     out: dict[str, float] = {}
     if not processed.is_dir():
@@ -212,24 +248,25 @@ def speeds_at_06(processed: Path) -> dict[str, float]:
     for folder in sorted(folders):
         speeds = []
         for path in sorted(folder.glob("*_C_b060p040*.parquet")):
-            d = pq.read_table(
-                path, columns=["trial", "t_trial_s", "omega_rad_s", "u_cmd"]
-            ).to_pydict()
-            names = np.array([x or "" for x in d["trial"]])
-            for name in sorted(set(names)):
+            for name, tr in load_traces(path).items():
                 if "_C_b060p040_rep" not in name:
                     continue
-                s = names == name
-                t = np.asarray(d["t_trial_s"], float)[s]
-                w = np.asarray(d["omega_rad_s"], float)[s]
-                u = np.asarray(d["u_cmd"], float)[s]
                 # A trial without a 1 s hold at 0.6 gives no speed.
-                hold = next((h for h in hold_segments(t, u, 1.0) if h[0] == 0.6), None)
+                hold = next(
+                    (
+                        h
+                        for h in hold_segments(tr.t, tr.u_cmd, 1.0)
+                        if math.isclose(h[0], 0.6, abs_tol=DUTY_TOL)
+                    ),
+                    None,
+                )
                 if hold is None:
                     continue
-                speeds.append(abs(hold_speed(t, w, hold[1], hold[2], FINAL_S)))
+                speeds.append(
+                    abs(hold_speed(tr.t, tr.omega, hold[1], hold[2], FINAL_S))
+                )
         if speeds:
-            out[folder.name.rsplit("-", 1)[1]] = float(np.mean(speeds))
+            out[folder.name] = float(np.mean(speeds))
     return out
 
 
@@ -268,7 +305,9 @@ def check_command(trace: Trace, t_cmd: float, duty: float) -> None:
     if not (before.any() and after.any()):
         raise ValueError(f"{trace.trial}: command at {t_cmd:.4f} s outside the trial")
     i = int(np.flatnonzero(after)[0])
-    if not np.isclose(trace.u_cmd[i], duty) or np.isclose(trace.u_cmd[i - 1], duty):
+    if not math.isclose(trace.u_cmd[i], duty, abs_tol=DUTY_TOL) or math.isclose(
+        trace.u_cmd[i - 1], duty, abs_tol=DUTY_TOL
+    ):
         raise ValueError(f"{trace.trial}: u_cmd does not change to {duty} at {t_cmd}")
 
 
@@ -327,12 +366,19 @@ def analyse_step(
 
 
 def _e2_changes(
-    raw: Path, traces: dict[str, Trace], trials: dict[str, dict]
+    logs: dict[str, PiEvents],
+    traces: dict[str, Trace],
+    trials: dict[str, dict],
+    channel: str,
 ) -> dict[str, list[float]]:
     changes = {}
     for name, tr in traces.items():
-        ch = command_changes(raw / "pi" / f"{name}_events.csv", trials[name]["drift"])
-        if [v for _, v in ch] != [s[2] for s in E2_STEPS]:
+        ch = command_changes(logs[name], trials[name]["drift"], channel)
+        duties = [v for _, v in ch]
+        if len(duties) != len(E2_STEPS) or not all(
+            math.isclose(v, s[2], abs_tol=DUTY_TOL)
+            for v, s in zip(duties, E2_STEPS, strict=True)
+        ):
             raise ValueError(f"{name}: duty schedule {ch} is not that of E2")
         for (t_cmd, duty), _ in zip(ch, E2_STEPS, strict=True):
             check_command(tr, t_cmd, duty)
@@ -359,29 +405,35 @@ def _e2_steps(
     return out
 
 
-def configure(folder: str, label: str) -> None:
-    """Point the case study at the runs of one motor.
+def configure(folder: str, label: str) -> CaseStudyConfig:
+    """Return the configuration of the case study of one motor.
 
     Args:
-        folder: Motor folder, such as db17-r5-left-m9; its side (left or right)
-            gives the wheel's channel in the Pi log.
+        folder: Motor folder name, not a path, such as db17-r5-left-m9; its
+            side (left or right) gives the wheel's channel in the Pi log.
         label: Start of the run and trial names, such as R5-L-m9.
 
     Raises:
-        ValueError: If the folder is not a left or right motor folder.
+        ValueError: If the folder is a path, not a motor folder name, or a
+            both folder.
     """
-    global MOTOR, LABEL, MOTOR_CHANNEL, E1_RUN, E1_TRIAL, E1_TRIAL_NEG
-    global E2_RUN, E2_PREFIX
-    parts = folder.split("-")
-    side = parts[2] if len(parts) > 2 else ""
-    if side not in ("left", "right"):
-        raise ValueError(f"{folder}: need a left or right motor folder")
-    MOTOR, LABEL, MOTOR_CHANNEL = folder, label, f"motor_{side}"
-    E1_RUN = f"{label}_A_sweep_dense_*.parquet"
-    E1_TRIAL = f"{label}_A_sweep_forward_010to036by020_rep01_"
-    E1_TRIAL_NEG = f"{label}_A_sweep_backward_010to036by020_rep01_"
-    E2_RUN = f"{label}_C_b060p040*.parquet"
-    E2_PREFIX = f"{label}_C_b060p040_rep"
+    example = "--folder takes the motor folder name only, such as db17-r5-left-m9"
+    if not folder or Path(folder).name != folder:
+        raise ValueError(f"{folder!r} is not a folder name; {example}")
+    try:
+        _, side = parse_motor_folder(folder)
+    except ValueError as exc:
+        raise ValueError(f"{exc}; {example}") from None
+    if side == "both":
+        raise ValueError(
+            f"{folder}: the case study analyses one wheel, but the runs of a both "
+            "folder drive two; give a left or right motor folder name, such as "
+            "db17-r5-left-m9"
+        )
+    return CaseStudyConfig(folder, label, f"motor_{side}")
+
+
+ARTICLE = configure(MOTOR, LABEL)
 
 
 def check_led_sync(trials: dict[str, dict], names: list[str]) -> None:
@@ -421,40 +473,46 @@ def _one_trial(traces: dict[str, Trace], prefix: str) -> Trace:
     return traces[found[0]]
 
 
-def case_study(data_root: Path, motor: str | None = None) -> CaseStudy:
+def case_study(data_root: Path, config: CaseStudyConfig = ARTICLE) -> CaseStudy:
     """Compute every result of the case study from data/processed and data/raw.
 
     Args:
         data_root: The data/ folder holding raw/ and processed/.
-        motor: The motor folder name, the same in raw/ and processed/
-            (default: MOTOR, set by configure()).
+        config: The motor to analyse, from configure() (default: the
+            article's motor).
 
     Raises:
-        ValueError: If motor differs from the folder set by configure(), whose
-            run and trial names and wheel channel would not fit it, or a trial
-            used is not synchronised by the LED.
+        FileNotFoundError: If a run is missing or matched more than once.
+        ValueError: If a trial is missing or used is not synchronised by the
+            LED, or a duty schedule is not that of its experiment.
     """
-    if motor is not None and motor != MOTOR:
-        raise ValueError(
-            f"{motor}: call configure({motor!r}, label) first; the case study "
-            f"is configured for {MOTOR}"
-        )
-    motor = MOTOR
-    proc = data_root / "processed" / motor
-    raw = data_root / "raw" / motor
-    e1_path = _one_run(proc, E1_RUN)
-    e2_path = _one_run(proc, E2_RUN)
+    proc = data_root / "processed" / config.folder
+    raw = data_root / "raw" / config.folder
+    e1_path = _one_run(proc, config.e1_run)
+    e2_path = _one_run(proc, config.e2_run)
     trials = trial_table(proc / "trials.parquet")
     e1_all = load_traces(e1_path)
-    e1 = _one_trial(e1_all, E1_TRIAL)
-    neg = _one_trial(e1_all, E1_TRIAL_NEG)
-    e2 = {k: v for k, v in load_traces(e2_path).items() if k.startswith(E2_PREFIX)}
+    e1 = _one_trial(e1_all, config.e1_trial)
+    neg = _one_trial(e1_all, config.e1_trial_neg)
+    prefix = config.e2_prefix
+    e2 = {k: v for k, v in load_traces(e2_path).items() if k.startswith(prefix)}
+    if not e2:
+        raise ValueError(
+            f"{e2_path.stem}: no trial whose name starts with {prefix}; the "
+            "trials column of its row in runs.csv is empty, or its trials are "
+            "labelled otherwise (check --label)"
+        )
     check_led_sync(trials, [e1.trial, neg.trial, *sorted(e2)])
-    e2_changes = _e2_changes(raw, e2, trials)
+    logs = {
+        n: read_pi_log(raw / "pi" / f"{n}_events.csv")
+        for n in (e1.trial, neg.trial, *e2)
+    }
+    e2_changes = _e2_changes(logs, e2, trials, config.channel)
     first_cmd = {n: c[0] for n, c in e2_changes.items()}
     for tr in (e1, neg):
-        log = raw / "pi" / f"{tr.trial}_events.csv"
-        first_cmd[tr.trial] = command_changes(log, trials[tr.trial]["drift"])[0][0]
+        drift = trials[tr.trial]["drift"]
+        changes = command_changes(logs[tr.trial], drift, config.channel)
+        first_cmd[tr.trial] = changes[0][0]
     traces = {e1.trial: e1, neg.trial: neg} | e2
     noise = np.concatenate(
         [rest_speeds(traces[n], first_cmd[n]) for n in sorted(first_cmd)]
@@ -479,9 +537,7 @@ def case_study(data_root: Path, motor: str | None = None) -> CaseStudy:
         trials=trials,
         meta_e1=run_metadata(e1_path),
         meta_e2=run_metadata(e2_path),
-        call_s=float(
-            np.median([call_duration(raw / "pi" / f"{n}_events.csv") for n in e2])
-        ),
+        call_s=float(np.median([call_duration(logs[n], config.channel) for n in e2])),
         speeds_06=speeds_at_06(data_root / "processed"),
         e1_neg_trial=neg.trial,
     )
