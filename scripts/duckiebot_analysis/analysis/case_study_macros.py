@@ -114,11 +114,66 @@ def _ripple_sd(s: StepResult) -> float:
     )
 
 
-def _level(cs: CaseStudy, duty: float, rising: bool) -> tuple[float, float]:
+def _level(cs: CaseStudy, duty: float, macro: str) -> tuple[float, float]:
+    """Return the mean and sd of the speed at the rising level at duty."""
     for lv in cs.e1_levels:
-        if math.isclose(lv.duty, duty) and lv.rising == rising:
+        if math.isclose(lv.duty, duty) and lv.rising:
             return lv.mean, lv.sd
-    raise ValueError(f"no {'rising' if rising else 'falling'} level at {duty}")
+    raise ValueError(
+        f"cannot compute {macro}: the forward E1 sweep has no rising level at duty "
+        f"{duty}; the sweep must hold that duty for at least 1.5 s on its way up"
+    )
+
+
+def _check_reportable(cs: CaseStudy) -> None:
+    """Raise, naming the macro and what the data lack, if one cannot be computed.
+
+    Raises:
+        ValueError: If a sweep has no start or stop duty, the sweeps have no
+            level at rest or none turning, or no motor has a hold at 0.6.
+    """
+    w_min = cs.omega_min
+    sweeps = (
+        ("", "forward", cs.e1_start, cs.e1_stop),
+        ("Neg", "backward", cs.e1_neg_start, cs.e1_neg_stop),
+    )
+    for prefix, sweep, start, stop in sweeps:
+        if not math.isfinite(start):
+            raise ValueError(
+                f"cannot compute {prefix}StartDuty: the wheel never starts (|mean "
+                f"speed| above omega_min = {w_min:.2f} rad/s) on a rising level of "
+                f"the {sweep} E1 sweep; the sweep must rise to a duty at which the "
+                "wheel turns"
+            )
+        if not math.isfinite(stop):
+            raise ValueError(
+                f"cannot compute {prefix}StopDuty: the wheel never stops (|mean "
+                f"speed| at most omega_min = {w_min:.2f} rad/s) on a falling level "
+                f"of the {sweep} E1 sweep after it started at duty {start:.2f}; the "
+                "sweep must go down to a duty at which the wheel stops"
+            )
+    speeds = [abs(x.mean) for x in cs.e1_levels + cs.e1_neg_levels]
+    if not any(w <= w_min for w in speeds):
+        raise ValueError(
+            "cannot compute RestLevelMax: the wheel is at rest at no level of the "
+            "E1 sweeps; they must include a duty at which the wheel does not turn"
+        )
+    if not any(w > w_min for w in speeds):
+        raise ValueError(
+            "cannot compute TurnLevelMin: the wheel turns at no level of the E1 "
+            "sweeps; they must include a duty at which the wheel turns"
+        )
+    if not any(not x.rising and abs(x.mean) > w_min for x in cs.e1_levels):
+        raise ValueError(
+            "cannot compute LastTurningDuty: the wheel turns at no falling level of "
+            "the forward E1 sweep; the sweep must come down through duties at "
+            "which the wheel still turns"
+        )
+    if not cs.speeds_06:
+        raise ValueError(
+            "cannot compute SpeedSixMin and SpeedSixMax: no motor folder in "
+            "data/processed has a C_b060p040 trial holding duty 0.6 for 1 s"
+        )
 
 
 def _dropped(cs: CaseStudy, trials: list[str]) -> float:
@@ -129,13 +184,21 @@ def _dropped(cs: CaseStudy, trials: list[str]) -> float:
 
 def case_study_macros(cs: CaseStudy) -> dict[str, str]:
     """Return the macros of every number the article reports."""
+    _check_reportable(cs)
     m: dict[str, str] = {}
     for key, prefix in STEP_NAMES.items():
-        m |= _step_macros(prefix, cs.steps[key])
+        s = cs.steps[key]
+        try:
+            m |= _step_macros(prefix, s)
+        except ValueError as exc:
+            raise ValueError(
+                f"cannot compute the {prefix} macros of the E2 step "
+                f"{s.u_from} -> {s.u_to}: {exc}"
+            ) from exc
     up06, up10 = cs.steps["up06"], cs.steps["up10"]
     down06, down0 = cs.steps["down06"], cs.steps["down0"]
-    w02, sd02 = _level(cs, 0.2, rising=True)
-    w_start, sd_start = _level(cs, cs.e1_start, rising=True)
+    w02, sd02 = _level(cs, 0.2, "SpeedAtTwo")
+    w_start, sd_start = _level(cs, cs.e1_start, "SpeedAtStart")
     rows = list(cs.trials.values())
     w_min = cs.omega_min
     turning_down = [

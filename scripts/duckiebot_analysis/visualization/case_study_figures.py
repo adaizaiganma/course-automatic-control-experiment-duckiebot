@@ -337,9 +337,16 @@ def make_all(cs: CaseStudy, figures: Path, macros: Path, command: str) -> list[P
     names, because doc/ ignores PDFs as build output; the macro file is
     \\input from the article folder.
 
+    The macros are computed first, so that data lacking a reported number
+    stop the run before any file is written.
+
     Returns:
         The paths written.
+
+    Raises:
+        ValueError: If a reported number cannot be computed from the data.
     """
+    macro_values = case_study_macros(cs)
     figures.mkdir(parents=True, exist_ok=True)
     paths = {
         "small": figures / "fig-small-duty.pdf",
@@ -358,5 +365,5 @@ def make_all(cs: CaseStudy, figures: Path, macros: Path, command: str) -> list[P
         compare=(cs.steps["up06"], "Model from the step to 0.6"),
     )
     fig_hysteresis(cs, paths["hyst"])
-    write_macros(paths["macros"], case_study_macros(cs), command)
+    write_macros(paths["macros"], macro_values, command)
     return list(paths.values())

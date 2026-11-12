@@ -85,12 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     macros = args.macros if args.macros is not None else figures / "results.tex"
     command = f"{COMMAND} --folder {args.folder} --label {args.label}"
     try:
-        configure(args.folder, args.label)
-        cs = case_study(args.data)
+        cs = case_study(args.data, configure(args.folder, args.label))
+        # make_all computes every reported number before it writes a file.
+        written = make_all(cs, figures, macros, command)
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    for path in make_all(cs, figures, macros, command):
+    for path in written:
         print(path)
     rest = figures / "fig-rest-noise.pdf"
     fig_rest_noise(cs.rest_noise, cs.omega_min, REST_EXCEEDANCE, rest)
