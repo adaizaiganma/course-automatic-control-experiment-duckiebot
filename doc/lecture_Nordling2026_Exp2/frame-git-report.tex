@@ -14,8 +14,9 @@
 \begin{verbatim}
 git fetch upstream
 git switch -c group03-report upstream/main
-git add doc/<your report folder>
-git add scripts/<script you changed>
+git add doc/<report>/main.tex
+git add doc/<report>/references.bib
+git add doc/<report>/figures/<figure>.pdf
 git commit -m "Add the group report"
 git push -u origin group03-report
 \end{verbatim}
@@ -25,7 +26,7 @@ git push -u origin group03-report
     \vspace{2pt}
     \textbf{Someone pushed first?} Run \texttt{git pull}, fix the lines marked \texttt{<<<<<<<}, then \texttt{add}, \texttt{commit}, \texttt{push}.
     \column{0.42\textwidth}
-    \textbf{PR 2 holds} the \LaTeX{} source of the report, \texttt{main.tex}, \texttt{references.bib}, and \texttt{figures/}, plus any changed scripts.
+    \textbf{PR 2 holds} the \LaTeX{} source of the report, \texttt{main.tex}, \texttt{references.bib}, and \texttt{figures/}, plus any changed scripts, each added by name.
 
     \vspace{2pt}
     \textbf{Due: Thursday 2026-11-26.}
